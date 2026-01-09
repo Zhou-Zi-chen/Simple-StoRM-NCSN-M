@@ -205,7 +205,7 @@ class VoicebankDataset(Dataset):
             - 'file_id': 文件名
             - 'transcription': 转录文本（如果有）
         """
-        # 获取文件路径
+            # 获取文件路径
         clean_path = self.clean_files[idx]
         noisy_path = self.noisy_files[idx]
         file_id = clean_path.stem
@@ -219,18 +219,35 @@ class VoicebankDataset(Dataset):
         clean_wav = clean_wav[:min_len]
         noisy_wav = noisy_wav[:min_len]
         
-        # 随机截取片段（训练时）或使用整个音频（测试时）
+        # 统一处理长度
         if self.mode == 'train':
-            clean_wav, noisy_wav = self._random_segment(clean_wav, noisy_wav)
+            # 训练时：随机截取或填充到固定长度
+            if len(clean_wav) >= self.segment_length:
+                # 随机截取
+                start = random.randint(0, len(clean_wav) - self.segment_length)
+                clean_wav = clean_wav[start:start + self.segment_length]
+                noisy_wav = noisy_wav[start:start + self.segment_length]
+            else:
+                # 填充
+                pad_len = self.segment_length - len(clean_wav)
+                clean_wav = F.pad(clean_wav, (0, pad_len))
+                noisy_wav = F.pad(noisy_wav, (0, pad_len))
         else:
-            # 测试时，如果太长则截取开头
+            # 测试时：固定长度处理
             if len(clean_wav) > self.segment_length:
+                # 截取开头
                 clean_wav = clean_wav[:self.segment_length]
                 noisy_wav = noisy_wav[:self.segment_length]
+            else:
+                # 填充
+                pad_len = self.segment_length - len(clean_wav)
+                clean_wav = F.pad(clean_wav, (0, pad_len))
+                noisy_wav = F.pad(noisy_wav, (0, pad_len))
         
-        # 数据增强
-        clean_wav, noisy_wav = self._augment_audio(clean_wav, noisy_wav)
-        
+        # 数据增强（仅训练）
+        if self.mode == 'train' and self.augment:
+            clean_wav, noisy_wav = self._augment_audio(clean_wav, noisy_wav)
+            
         # 获取转录文本
         transcription = self.transcriptions.get(file_id, "")
         
