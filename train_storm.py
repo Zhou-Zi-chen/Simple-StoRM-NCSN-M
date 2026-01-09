@@ -93,7 +93,7 @@ class StoRMTrainer:
             for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters()):
                 ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
     
-    def compute_loss(self, clean_stft, noisy_stft, time):
+    def compute_loss(self, clean_stft, noisy_stft):
         """
         计算StoRM联合损失（公式17）
         
@@ -150,7 +150,7 @@ class StoRMTrainer:
             
             # 前向传播和损失计算
             self.optimizer.zero_grad()
-            loss_dict = self.compute_loss(clean_stft, noisy_stft, None)
+            loss_dict = self.compute_loss(clean_stft, noisy_stft)
             
             # 反向传播
             loss_dict['total'].backward()
@@ -207,7 +207,7 @@ class StoRMTrainer:
                 noisy_stft = batch['noisy_stft'].to(self.device)
                 
                 # 使用EMA模型计算损失
-                loss_dict = self.compute_loss(clean_stft, noisy_stft, None)
+                loss_dict = self.compute_loss(clean_stft, noisy_stft)
                 
                 total_loss += loss_dict['total'].item()
                 total_supervised += loss_dict['supervised'].item()
