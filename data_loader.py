@@ -502,7 +502,7 @@ def create_dataloaders(data_root: str,
         shuffle=False,
         num_workers=num_workers,
         collate_fn=test_collator,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),  # 只在有GPU时启用
         drop_last=False  # 测试时不丢弃
     )
     
