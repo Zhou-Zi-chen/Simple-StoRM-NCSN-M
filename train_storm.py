@@ -361,8 +361,8 @@ class StoRMTrainer:
             })
             
             # 定期保存检查点
-            if (batch_idx + 1) % 100 == 0:
-                self.save_checkpoint(f'epoch_{self.current_epoch}_batch_{batch_idx}.pt')
+            # if (batch_idx + 1) % 100 == 0:
+            #     self.save_checkpoint(f'epoch_{self.current_epoch}_batch_{batch_idx}.pt')
         
         # 计算平均损失
         avg_loss = total_loss / len(self.train_loader)
