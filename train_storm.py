@@ -411,7 +411,7 @@ class StoRMTrainer:
             'val_dsm': avg_dsm
         }
     
-    def train(self, num_epochs: int, save_every: int = 5, pretrain_epochs: int = 10, ):
+    def train(self, num_epochs: int, save_every: int = 10, pretrain_epochs: int = 10, ):
         """主训练循环"""
         
         # 第一阶段：预训练预测模型
