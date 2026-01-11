@@ -199,7 +199,8 @@ class StoRMTrainer:
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
-        return total_loss / len(self.test_loader)
+        avg_loss = total_loss / len(self.test_loader)
+        return {'val_loss':avg_loss, 'loss': avg_loss}
 
     def pretrain_predictive_model(self, max_epochs=50, patience=5, min_delta=0.001):
         """预训练预测模型，带早停机制"""
@@ -228,11 +229,15 @@ class StoRMTrainer:
         
         for epoch in range(max_epochs):
             # 训练一个epoch
-            train_loss = self._train_predictive_epoch()
+            train_result = self._train_predictive_epoch()
             
             # 在验证集上评估
-            val_loss = self._evaluate_predictive_model()
+            val_result = self._evaluate_predictive_model()
             
+            # 从字典中提取损失值
+            train_loss = train_result.get('train_loss', train_result.get('loss', 0.0))
+            val_loss = val_result.get('val_loss', val_result.get('loss', 0.0))
+
             # 更新学习率
             predictive_scheduler.step(val_loss)
             
@@ -309,7 +314,8 @@ class StoRMTrainer:
             total_loss += loss.item()
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
-        return {'train_loss': total_loss / len(self.train_loader)}
+        avg_loss = total_loss / len(self.train_loader)
+        return {'train_loss': avg_loss, 'loss': avg_loss}
 
     def _train_joint_epoch(self):
         """训练一个epoch"""
@@ -434,6 +440,9 @@ class StoRMTrainer:
             'val_supervised': [],
             'val_dsm': []
         }
+
+        best_loss = float('inf')
+        patience_counter = 0
         
         for epoch in range(num_epochs):
             self.current_epoch = epoch + 1
@@ -447,25 +456,61 @@ class StoRMTrainer:
             # 评估
             val_metrics = self.evaluate()
             
-            # 记录历史
-            for key in train_metrics:
-                history[key].append(train_metrics[key])
-            for key in val_metrics:
-                history[key].append(val_metrics[key])
+            # 记录历史 - 确保 train_metrics 和 val_metrics 是字典
+            if isinstance(train_metrics, dict):
+                for key in train_metrics:
+                    if key in history:
+                        history[key].append(train_metrics[key])
+            else:
+                # 如果是标量，假设它是总损失
+                history['train_loss'].append(train_metrics)
+                print(f"警告: train_metrics 是标量，不是字典: {train_metrics}")
             
-            # 打印结果
-            print(f"训练损失: {train_metrics['train_loss']:.4f} "
-                f"(监督: {train_metrics['train_supervised']:.4f}, "
-                f"DSM: {train_metrics['train_dsm']:.4f})")
-            print(f"验证损失: {val_metrics['val_loss']:.4f} "
-                f"(监督: {val_metrics['val_supervised']:.4f}, "
-                f"DSM: {val_metrics['val_dsm']:.4f})")
+            if isinstance(val_metrics, dict):
+                for key in val_metrics:
+                    if key in history:
+                        history[key].append(val_metrics[key])
+            else:
+                # 如果是标量，假设它是总损失
+                history['val_loss'].append(val_metrics)
+                print(f"警告: val_metrics 是标量，不是字典: {val_metrics}")
             
-            # 保存最佳模型
-            if val_metrics['val_loss'] < self.best_loss:
-                self.best_loss = val_metrics['val_loss']
+            # 打印结果 - 安全地访问字典键
+            if isinstance(train_metrics, dict):
+                print(f"训练损失: {train_metrics.get('train_loss', 'N/A'):.4f} "
+                    f"(监督: {train_metrics.get('train_supervised', 'N/A'):.4f}, "
+                    f"DSM: {train_metrics.get('train_dsm', 'N/A'):.4f})")
+            else:
+                print(f"训练损失: {train_metrics:.4f}")
+                
+            if isinstance(val_metrics, dict):
+                print(f"验证损失: {val_metrics.get('val_loss', 'N/A'):.4f} "
+                    f"(监督: {val_metrics.get('val_supervised', 'N/A'):.4f}, "
+                    f"DSM: {val_metrics.get('val_dsm', 'N/A'):.4f})")
+            else:
+                print(f"验证损失: {val_metrics:.4f}")
+                
+            
+            # 保存最佳模型 - 需要提取损失值
+            if isinstance(val_metrics, dict):
+                current_val_loss = val_metrics.get('val_loss', float('inf'))
+            else:
+                current_val_loss = val_metrics
+                
+            if current_val_loss < best_loss:
+                best_loss = current_val_loss
+                self.best_loss = best_loss  # 更新类属性
                 self.save_checkpoint('best_model.pt')
-                print(f"✓ 保存最佳模型，损失: {self.best_loss:.4f}")
+                patience_counter = 0
+                print(f"✓ 保存最佳模型，损失: {best_loss:.4f}")
+            else:
+                patience_counter += 1
+                print(f"  早停计数器: {patience_counter}/{pretrain_epochs}")
+            
+            # 早停检查
+            if patience_counter >= pretrain_epochs:
+                print(f"  ⚠️ 早停触发！在epoch {self.current_epoch}停止训练")
+                break
             
             # 定期保存
             if self.current_epoch % save_every == 0:
@@ -478,7 +523,8 @@ class StoRMTrainer:
                 self.save_history(history)
         
         print(f"\n训练完成!")
-        print(f"最佳验证损失: {self.best_loss:.4f}")
+        print(f"最佳验证损失: {best_loss:.4f}")
+        print(f"总训练epoch数: {self.current_epoch}")
         
         return history
     
