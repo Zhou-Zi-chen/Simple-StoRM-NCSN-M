@@ -46,7 +46,7 @@ class StoRMDiffusionModel(nn.Module):
     StoRM扩散模型 - 修正维度配置
     """
     
-    def __init__(self, base_channels=32, time_embed_dim=256):
+    def __init__(self, base_channels=32, time_embed_dim=256, verbose=True):  # 添加verbose参数
         super().__init__()
         
         self.time_embed_dim = time_embed_dim
@@ -67,12 +67,13 @@ class StoRMDiffusionModel(nn.Module):
         # STFT处理器
         self.stft = STFTProcessor()
         
-        print("扩散模型初始化:")
-        total_params, _ = self.network.count_parameters()
-        print(f"总参数: {total_params:,}")
-        print(f"预计文件大小: {total_params * 4 / 1024 / 1024:.2f} MB")
-        print(f"输入通道: 6 (xτ + y + Dθ(y))")
-        print(f"时间嵌入维度: 输入={time_embed_dim}, 输出={condition_dim}")
+        if verbose:
+            print("扩散模型初始化:")
+            total_params, _ = self.network.count_parameters()
+            print(f"总参数: {total_params:,}")
+            print(f"预计文件大小: {total_params * 4 / 1024 / 1024:.2f} MB")
+            print(f"输入通道: 6 (xτ + y + Dθ(y))")
+            print(f"时间嵌入维度: 输入={time_embed_dim}, 输出={condition_dim}")
     
     def forward(self, x_tau, noisy_stft, denoised_stft, time):
         # 确保time是正确形状

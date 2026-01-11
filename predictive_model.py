@@ -9,7 +9,7 @@ class PredictiveModel(nn.Module):
     判别模型（第一阶段）
     """
     
-    def __init__(self, base_channels=32):
+    def __init__(self, base_channels=32, verbose=True):  # 添加verbose参数
         super().__init__()
         
         # NCSN++M架构，无条件
@@ -24,10 +24,11 @@ class PredictiveModel(nn.Module):
         # STFT处理器
         self.stft = STFTProcessor()
         
-        print("判别模型初始化:")
-        total_params, _ = self.network.count_parameters()
-        print(f"总参数: {total_params:,}")
-        print(f"预计文件大小: {total_params * 4 / 1024 / 1024:.2f} MB")
+        if verbose:
+            print("判别模型初始化:")
+            total_params, _ = self.network.count_parameters()
+            print(f"总参数: {total_params:,}")
+            print(f"预计文件大小: {total_params * 4 / 1024 / 1024:.2f} MB")
     
     def forward(self, y_stft):
         """

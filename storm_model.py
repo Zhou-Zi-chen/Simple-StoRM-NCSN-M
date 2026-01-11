@@ -10,14 +10,14 @@ class StoRMModel(nn.Module):
     完整的StoRM模型 - 修正时间传递问题
     """
     
-    def __init__(self, base_channels=32, condition_dim=256):
+    def __init__(self, base_channels=32, condition_dim=256, verbose=True):  # 添加verbose参数
         super().__init__()
         
         # 判别模型
-        self.predictive_model = PredictiveModel(base_channels)
+        self.predictive_model = PredictiveModel(base_channels, verbose=verbose)
         
         # 扩散模型
-        self.diffusion_model = StoRMDiffusionModel(base_channels, condition_dim)
+        self.diffusion_model = StoRMDiffusionModel(base_channels, condition_dim, verbose=verbose)
         
         # SDE
         self.sde = OrnsteinUhlenbeckSDE()
