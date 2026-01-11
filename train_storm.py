@@ -49,6 +49,16 @@ class StoRMTrainer:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
+        # 添加训练阶段标志
+        self.training_phase = 'joint'  # 'pretrain_predictor', 'joint'
+        
+        # 创建单独的预测模型优化器
+        self.predictive_optimizer = optim.Adam(
+            self.model.predictive_model.parameters(),
+            lr=lr,
+            betas=(0.9, 0.999)
+        )
+
         # 优化器
         self.optimizer = optim.Adam(
             list(self.model.predictive_model.parameters()) + 
@@ -124,9 +134,6 @@ class StoRMTrainer:
         # 获取判别模型输出
         denoised_stft = self.model.predictive_model(noisy_stft)
         
-        # 计算监督损失（第一阶段）
-        supervised_loss = self.mse_loss(denoised_stft, clean_stft)
-        
         # 采样扰动状态
         time_for_sde = time.view(-1, 1, 1, 1)
         x_tau, noise = self.model.sde.sample_perturbed_state(clean_stft, denoised_stft, time_for_sde)
@@ -137,27 +144,32 @@ class StoRMTrainer:
         # 计算噪声水平σ(τ)
         std = self.model.sde.marginal_std(time).view(-1, 1, 1, 1)
 
+        # 计算目标：根据公式(7)：∇log p = -(xτ - μ)/σ²
+        # 由于 noise = (xτ - μ)/σ，所以 target = -noise/σ
+        target = -noise / (std + 1e-6)
+        
+        # ========== 实现DSM损失 ==========
+        # 使用权重函数 λ(t) = σ(τ)²
+        weight = std**2  # λ(t)
+        
+        # 计算加权平方误差
+        squared_error = (score - target)**2
+        weighted_squared_error = squared_error * weight
+        
+        # DSM损失
+        dsm_loss = weighted_squared_error.mean()
+
+        # ========== 监督损失 ==========
+        supervised_loss = self.mse_loss(denoised_stft, clean_stft)
+    
         # 用于DeBug
-        # print(f"  std范围: [{std.min():.6f}, {std.max():.6f}]")
-        # print(f"  score范围: [{score.min():.3f}, {score.max():.3f}]")
-        
-        # 计算分数匹配损失（第二阶段）
-        target = -noise / (std + 1e-6)  # 添加epsilon防止除零  # 根据公式(7)：∇log p = -(xτ - μ)/σ²，而μ = E[xτ]，noise = (xτ - μ)/σ
-        
-        # 用于DeBug
-        # print(f"  target范围: [{target.min():.3f}, {target.max():.3f}]")  ## 实测发现target范围很大
-        # print(f"  noise范围: [{noise.min():.3f}, {noise.max():.3f}]")
-        
-        # 权重函数 λ(t) = std² 或 1/std²，根据具体推导
-        # 对于去噪分数匹配，常用 λ(t) = std²
-        weight = std**2
-        
-        # 加权损失
-        weighted_score = score * weight
-        weighted_target = target * weight
-        
-        dsm_loss = self.mse_loss(weighted_score, weighted_target) / (weight.mean() + 1e-8)
-        
+        # print(f"    std范围: [{std.min():.6f}, {std.max():.6f}]")
+        # print(f"    weight范围: [{weight.min():.6f}, {weight.max():.6f}]")
+        # print(f"    score范围: [{score.min():.3f}, {score.max():.3f}]")
+        # print(f"    target范围: [{target.min():.3f}, {target.max():.3f}]")
+        # print(f"    DSM损失: {dsm_loss.item():.6f}")
+        # print(f"    监督损失: {supervised_loss.item():.6f}")
+
         # 总损失
         total_loss = self.alpha * supervised_loss + dsm_loss
         
@@ -168,7 +180,138 @@ class StoRMTrainer:
             'denoised': denoised_stft.detach()
         }
     
+    # 训练predictive model
+    def _evaluate_predictive_model(self):
+        """评估预测模型"""
+        self.model.eval()
+        total_loss = 0
+        
+        with torch.no_grad():
+            pbar = tqdm(self.test_loader, desc='评估预测模型')
+            
+            for batch in pbar:
+                clean_stft = batch['clean_stft'].to(self.device)
+                noisy_stft = batch['noisy_stft'].to(self.device)
+                
+                denoised = self.model.predictive_model(noisy_stft)
+                loss = self.mse_loss(denoised, clean_stft)
+                
+                total_loss += loss.item()
+                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        return total_loss / len(self.test_loader)
+
+    def pretrain_predictive_model(self, max_epochs=50, patience=5, min_delta=0.001):
+        """预训练预测模型，带早停机制"""
+        print(f"\n开始预训练预测模型，最多 {max_epochs} 个epoch")
+        self.training_phase = 'pretrain_predictor'
+        
+        # 创建预测模型专用的优化器
+        self.predictive_optimizer = optim.Adam(
+            self.model.predictive_model.parameters(),
+            lr=self.lr,  # 可以使用相同的学习率
+            betas=(0.9, 0.999)
+        )
+        
+        # 可选：为预测模型使用学习率调度器
+        predictive_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.predictive_optimizer,
+            mode='min',
+            factor=0.5,
+            patience=3,
+            min_lr=1e-6
+        )
+        
+        best_loss = float('inf')
+        patience_counter = 0
+        best_model_state = None
+        
+        for epoch in range(max_epochs):
+            # 训练一个epoch
+            train_loss = self._train_predictive_epoch()
+            
+            # 在验证集上评估
+            val_loss = self._evaluate_predictive_model()
+            
+            # 更新学习率
+            predictive_scheduler.step(val_loss)
+            
+            print(f"预训练 Epoch {epoch+1}/{max_epochs}: "
+                f"训练损失 = {train_loss:.4f}, "
+                f"验证损失 = {val_loss:.4f}, "
+                f"学习率 = {self.predictive_optimizer.param_groups[0]['lr']:.2e}")
+            
+            # 早停检查
+            if val_loss < best_loss - min_delta:
+                best_loss = val_loss
+                patience_counter = 0
+                # 保存最佳模型状态
+                best_model_state = {
+                    'model': self.model.predictive_model.state_dict(),
+                    'optimizer': self.predictive_optimizer.state_dict(),
+                    'epoch': epoch,
+                    'loss': val_loss
+                }
+                
+                # 保存检查点
+                checkpoint_path = self.checkpoint_dir / self.experiment_id / 'best_pretrained_predictor.pt'
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(best_model_state, checkpoint_path)
+                print(f"  ✓ 保存最佳预测模型: {checkpoint_path}")
+            else:
+                patience_counter += 1
+                print(f"  早停计数器: {patience_counter}/{patience}")
+                
+            if patience_counter >= patience:
+                print(f"  ⚠️ 早停触发！在epoch {epoch+1}停止预训练")
+                break
+        
+        # 加载最佳模型
+        if best_model_state is not None:
+            self.model.predictive_model.load_state_dict(best_model_state['model'])
+            print(f"  加载最佳预测模型 (epoch {best_model_state['epoch']+1}, 损失={best_model_state['loss']:.4f})")
+        
+        print(f"预测模型预训练完成! 最佳验证损失: {best_loss:.4f}")
+        self.training_phase = 'joint'
+        
+        # 清理不再需要的优化器
+        del self.predictive_optimizer
+        
+        return best_loss
+    
     def train_epoch(self):
+        """修改后的训练epoch"""
+        self.model.train()
+        
+        if self.training_phase == 'pretrain_predictor':
+            return self._train_predictive_epoch()
+        else:
+            return self._train_joint_epoch()
+    
+    def _train_predictive_epoch(self):
+        """只训练预测模型的epoch"""
+        total_loss = 0
+        
+        pbar = tqdm(self.train_loader, desc=f'预测模型训练')
+        
+        for batch_idx, batch in enumerate(pbar):
+            clean_stft = batch['clean_stft'].to(self.device)
+            noisy_stft = batch['noisy_stft'].to(self.device)
+            
+            self.predictive_optimizer.zero_grad()
+            denoised = self.model.predictive_model(noisy_stft)
+            loss = self.mse_loss(denoised, clean_stft)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.predictive_model.parameters(), max_norm=1.0)
+            self.predictive_optimizer.step()
+            
+            total_loss += loss.item()
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        return {'train_loss': total_loss / len(self.train_loader)}
+
+    def _train_joint_epoch(self):
         """训练一个epoch"""
         self.model.train()
         total_loss = 0
@@ -268,9 +411,17 @@ class StoRMTrainer:
             'val_dsm': avg_dsm
         }
     
-    def train(self, num_epochs: int, save_every: int = 5):
+    def train(self, num_epochs: int, save_every: int = 5, pretrain_epochs: int = 10, ):
         """主训练循环"""
         
+        # 第一阶段：预训练预测模型
+        if pretrain_epochs > 0:
+            self.pretrain_predictive_model(pretrain_epochs)
+            # 保存预训练好的预测模型
+            self.save_checkpoint('pretrained_predictor.pt')
+
+
+        # 第二阶段：联合训练
         print(f"\n开始训练，共 {num_epochs} 个epoch")
         print("=" * 60)
         
@@ -378,6 +529,18 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='训练StoRM模型')
     
+    # 训练阶段参数
+    parser.add_argument('--pretrain_epochs', type=int, default=100,
+                        help='预测模型预训练最大轮数')
+    parser.add_argument('--joint_epochs', type=int, default=200,
+                        help='联合训练最大轮数')
+    parser.add_argument('--no_pretrain', action='store_true',
+                        help='跳过预训练阶段')
+    parser.add_argument('--pretrain_patience', type=int, default=10,
+                        help='预训练早停耐心值')
+    parser.add_argument('--joint_patience', type=int, default=15,
+                        help='联合训练早停耐心值')
+
     # 数据参数
     parser.add_argument('--data_root', type=str, default='./speech_data',
                         help='语音数据根目录')
@@ -468,29 +631,45 @@ def main():
         print(f"测试结果: {metrics}")
         return
     
-    # 训练
-    print(f"\n开始训练，共 {args.num_epochs} 个epoch")
-    print("=" * 60)
+    # ===== 阶段1: 预训练预测模型 =====
+    if not args.no_pretrain:
+        # 检查是否有 resume_pretrained 属性
+        if hasattr(args, 'resume_pretrained') and args.resume_pretrained:
+            # 加载预训练模型
+            checkpoint = torch.load(args.resume_pretrained, map_location=args.device)
+            model.predictive_model.load_state_dict(checkpoint['model'])
+            print(f"加载预训练模型: {args.resume_pretrained}")
+        else:
+            # 从头开始预训练
+            trainer.pretrain_predictive_model(
+                max_epochs=args.pretrain_epochs,
+                patience=args.pretrain_patience
+            )
     
+    # ===== 阶段2: 联合训练 =====
+    if args.resume_joint:
+        # 继续联合训练
+        trainer.load_checkpoint(args.resume_joint)
+    
+    # 开始联合训练
     history = trainer.train(
-        num_epochs=args.num_epochs,
-        save_every=5
+        num_epochs=args.joint_epochs,
+        pretrain_epochs=args.joint_patience,
+        save_every=10
     )
     
-    # 保存最终结果
-    final_checkpoint = trainer.checkpoint_dir / trainer.experiment_id / 'final_results.json'
-    with open(final_checkpoint, 'w') as f:
+    print(f"\n训练完成!")
+    
+    # 保存最终历史
+    final_path = trainer.log_dir / trainer.experiment_id / 'training_history.json'
+    with open(final_path, 'w') as f:
         json.dump({
             'config': vars(args),
-            'final_metrics': {
-                'best_val_loss': trainer.best_loss,
-                'final_train_loss': history['train_loss'][-1],
-                'final_val_loss': history['val_loss'][-1]
-            }
+            'history': history,
+            'best_loss': trainer.best_loss
         }, f, indent=2)
     
-    print(f"\n训练完成!")
-    print(f"最终结果已保存到: {final_checkpoint}")
+    print(f"训练历史已保存到: {final_path}")
 
 
 def test_inference():
